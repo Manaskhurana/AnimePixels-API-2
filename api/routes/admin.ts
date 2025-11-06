@@ -7,16 +7,13 @@ import { v2 as cloudinary } from 'cloudinary';
 import streamifier from 'streamifier';
 
 const router = Router();
-
-// Enhanced multer configuration with file limits and better error handling
 const storage = multer.memoryStorage();
 const upload = multer({ 
   storage,
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB max file size
+    fileSize: 50 * 1024 * 1024,
   },
   fileFilter: (req, file, cb) => {
-    // Only allow image and gif uploads
     const allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
     if (allowedMimes.includes(file.mimetype)) {
       cb(null, true);
@@ -26,7 +23,6 @@ const upload = multer({
   }
 });
 
-// Configure Cloudinary
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
@@ -40,7 +36,6 @@ if (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
   });
 }
 
-// Type definitions
 interface MediaRecord {
   id: number;
   title: string;
@@ -80,26 +75,39 @@ interface UploadFile {
   buffer: Buffer;
 }
 
+// Helper function to normalize array fields from multipart/form-data
+function normalizeArrayField(field: any): string[] {
+  if (!field) return [];
+  if (Array.isArray(field)) return field;
+  if (typeof field === 'string') {
+    // Try parsing as JSON first
+    try {
+      const parsed = JSON.parse(field);
+      if (Array.isArray(parsed)) return parsed;
+      return [field];
+    } catch {
+      return [field];
+    }
+  }
+  return [];
+}
+
 // ---------- LOGIN ENDPOINT ----------
 router.post('/login', async (req: Request, res: Response): Promise<void> => {
   try {
     const { username, password } = req.body;
-
     if (!username || !password) {
       res.status(400).json({ error: 'Username and password required' });
       return;
     }
-
     if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
       res.status(401).json({ error: 'Invalid credentials' });
       return;
     }
-
     const token = createJwtToken({
       sub: username,
       is_admin: true,
     });
-
     logger.info(`✓ Admin login successful for user: ${username}`);
     res.json({ token });
   } catch (error: any) {
@@ -112,7 +120,6 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
 router.get('/init-db', authenticateAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
     const conn = await getConnection();
-    
     await conn.query(`
       CREATE TABLE IF NOT EXISTS media (
         id SERIAL PRIMARY KEY,
@@ -130,9 +137,7 @@ router.get('/init-db', authenticateAdmin, async (req: Request, res: Response): P
       CREATE INDEX IF NOT EXISTS idx_media_type ON media(media_type);
       CREATE INDEX IF NOT EXISTS idx_media_visible ON media(visible);
     `);
-
     conn.release();
-
     logger.info('✓ Database tables initialized');
     res.json({
       status: 'success',
@@ -157,9 +162,7 @@ router.get('/stats', authenticateAdmin, async (req: Request, res: Response): Pro
         SUM(views) as total_views
       FROM media
     `);
-
     const summary = result.rows[0];
-
     const categoryResult = await query(`
       SELECT 
         category,
@@ -170,7 +173,6 @@ router.get('/stats', authenticateAdmin, async (req: Request, res: Response): Pro
       GROUP BY category
       ORDER BY category
     `);
-
     const byCategory: Record<string, any> = {};
     categoryResult.rows.forEach((row: any) => {
       byCategory[row.category] = {
@@ -179,7 +181,6 @@ router.get('/stats', authenticateAdmin, async (req: Request, res: Response): Pro
         gifs: parseInt(row.gifs) || 0,
       };
     });
-
     res.json({
       status: 'ok',
       database: 'connected',
@@ -210,9 +211,7 @@ router.get('/tables', authenticateAdmin, async (req: Request, res: Response): Pr
         SUM(CASE WHEN media_type = 'gif' THEN 1 ELSE 0 END) as gifs
       FROM media
     `);
-
     const row = result.rows[0];
-
     res.json({
       status: 'ok',
       tables: ['media'],
@@ -235,7 +234,6 @@ router.post(
   upload.array('files', 100),
   async (req: Request, res: Response): Promise<void> => {
     try {
-      // Validate Cloudinary config
       if (!cloudinary.config().cloud_name) {
         logger.error('Cloudinary configuration missing');
         res.status(500).json({ 
@@ -245,24 +243,44 @@ router.post(
         return;
       }
 
-      // Cast files to our UploadFile interface type
       const files = (req as any).files as UploadFile[] || [];
-      const { titles, categories, media_type } = req.body;
+      
+      // Normalize array fields - THIS IS THE KEY FIX
+      let titles = normalizeArrayField(req.body.titles);
+      let categories = normalizeArrayField(req.body.categories);
+      const media_type = req.body.media_type;
 
-      // Validation checks
+      logger.info(`Request body received: titles=${JSON.stringify(req.body.titles)}, categories=${JSON.stringify(req.body.categories)}`);
+      logger.info(`Normalized: titles.length=${titles.length}, categories.length=${categories.length}, files.length=${files.length}`);
+
       if (files.length === 0) {
         res.status(400).json({ error: 'No files provided' });
         return;
       }
 
-      if (!Array.isArray(titles) || !Array.isArray(categories)) {
-        res.status(400).json({ error: 'Titles and categories must be arrays' });
-        return;
+      // If only one title/category provided, replicate it for all files
+      if (titles.length === 1 && files.length > 1) {
+        logger.info(`Single title provided for ${files.length} files - replicating`);
+        const singleTitle = titles[0];
+        titles = files.map((_, idx) => `${singleTitle} ${idx + 1}`);
       }
 
+      if (categories.length === 1 && files.length > 1) {
+        logger.info(`Single category provided for ${files.length} files - replicating`);
+        const singleCategory = categories[0];
+        categories = Array(files.length).fill(singleCategory);
+      }
+
+      // Validate array lengths
       if (titles.length !== files.length) {
         res.status(400).json({
           error: `Titles count (${titles.length}) != files count (${files.length})`,
+          hint: 'Provide either one title for all files, or one title per file',
+          received: {
+            files: files.length,
+            titles: titles.length,
+            categories: categories.length
+          }
         });
         return;
       }
@@ -270,6 +288,12 @@ router.post(
       if (categories.length !== files.length) {
         res.status(400).json({
           error: `Categories count (${categories.length}) != files count (${files.length})`,
+          hint: 'Provide either one category for all files, or one category per file',
+          received: {
+            files: files.length,
+            titles: titles.length,
+            categories: categories.length
+          }
         });
         return;
       }
@@ -279,7 +303,6 @@ router.post(
         return;
       }
 
-      // Initialize response arrays with explicit types
       const uploadedMedia: UploadedMediaItem[] = [];
       const errors: UploadError[] = [];
       let successCount = 0;
@@ -287,30 +310,26 @@ router.post(
 
       logger.info(`Starting bulk upload: ${files.length} files, type=${media_type}`);
 
-      // Process each file
       for (let idx = 0; idx < files.length; idx++) {
         try {
           const file = files[idx];
           const title = String(titles[idx]).trim();
           let category = String(categories[idx]).trim();
 
-          // Validate title
           if (!title) {
             throw new Error('Title cannot be empty');
           }
 
-          // Validate and normalize category
           category = validateCategory(category);
 
-          logger.info(`[${idx + 1}/${files.length}] Uploading: ${file.originalname} (${file.size} bytes)`);
+          logger.info(`[${idx + 1}/${files.length}] Uploading: ${file.originalname} (${file.size} bytes) - Title: "${title}", Category: "${category}"`);
 
-          // Prepare Cloudinary upload parameters
           const uploadParams: any = {
             resource_type: 'image',
             folder: `animepixels/${category}`,
             use_filename: true,
             unique_filename: true,
-            timeout: 60000, // 60 seconds in milliseconds
+            timeout: 60000,
           };
 
           if (media_type === 'gif') {
@@ -320,7 +339,6 @@ router.post(
 
           logger.info(`Upload params: resource_type=${uploadParams.resource_type}, folder=${uploadParams.folder}, format=${uploadParams.format || 'auto'}`);
 
-          // Upload to Cloudinary
           const uploadResult = await new Promise<any>((resolve, reject) => {
             const stream = cloudinary.uploader.upload_stream(
               uploadParams,
@@ -334,7 +352,6 @@ router.post(
               }
             );
 
-            // Handle stream errors
             stream.on('error', (error: any) => {
               logger.error(`Stream error: ${error.message}`);
               reject(error);
@@ -350,7 +367,6 @@ router.post(
 
           logger.info(`✓ Cloudinary upload successful: ${secureUrl}`);
 
-          // Save to database
           const insertResult = await query(
             `INSERT INTO media (title, category, url, media_type, visible, views)
              VALUES ($1, $2, $3, $4, $5, $6)
@@ -361,19 +377,18 @@ router.post(
           const mediaRecord: MediaRecord = insertResult.rows[0];
           logger.info(`✓ Database save successful: Media ID ${mediaRecord.id}`);
 
-          // Add to success response
           const uploadedItem: UploadedMediaItem = {
             filename: file.originalname,
             title,
             category,
             media: mediaRecord,
           };
+
           uploadedMedia.push(uploadedItem);
           successCount++;
         } catch (error: any) {
           logger.error(`✗ Error uploading ${files[idx].originalname}:`, error.message);
           failedCount++;
-
           const errorItem: UploadError = {
             filename: files[idx].originalname,
             index: idx,
@@ -383,7 +398,6 @@ router.post(
         }
       }
 
-      // Send response
       const response: BulkUploadResponse = {
         success: successCount,
         failed: failedCount,
