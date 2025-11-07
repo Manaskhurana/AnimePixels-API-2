@@ -480,4 +480,19 @@ router.get('/gif/:category', async (req: Request, res: Response): Promise<void> 
   }
 });
 
+// ---------- GET ALL CATEGORIES ----------
+router.get('/categories', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const result = await dbQuery(
+      `SELECT DISTINCT category FROM media WHERE visible = true`
+    );
+    const categories = result.rows.map(row => row.category);
+    res.json({ categories });
+  } catch (error: any) {
+    logger.error('Get categories error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
 export default router;
